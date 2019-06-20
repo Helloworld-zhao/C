@@ -1,0 +1,323 @@
+
+
+/***********************************************************************************
+* INCLUDES
+*/
+#include "hal_defs.h"
+#include "hal_cc8051.h"
+#include "hal_uart.h" 
+#include "hal_digio.h"                //添加头文件
+#include <stdio.h>
+#include <string.h>
+#include	<stdarg.h>
+//change
+#include <hal_lcd.h>
+#include <hal_led.h>
+#include <hal_joystick.h>
+#include <hal_assert.h>
+#include <hal_board.h>
+#include <hal_int.h>
+#include "hal_mcu.h"
+#include "hal_button.h"
+#include "hal_rf.h"
+#include "util_lcd.h"
+#include "basic_rf.h"
+/***********************************************************************************
+* CONSTANTS
+*/
+// Application parameters
+#define RF_CHANNEL                25      // 2.4 GHz RF channel
+
+// BasicRF address definitions
+#define PAN_ID                0x2007
+#define SWITCH_ADDR           0x2520
+#define LIGHT_ADDR            0xBEEF
+#define APP_PAYLOAD_LENGTH        1
+#define LIGHT_TOGGLE_CMD          0
+
+// Application states
+#define IDLE                      0
+#define SEND_CMD                  1
+
+// Application role
+#define NONE                      0
+#define SWITCH                    1
+#define LIGHT                     2
+#define APP_MODES                 2
+
+/***********************************************************************************
+* LOCAL VARIABLES
+*/
+static uint8 pTxData[APP_PAYLOAD_LENGTH];
+static uint8 pRxData[APP_PAYLOAD_LENGTH];
+static basicRfCfg_t basicRfConfig;
+//改动
+digioConfig *port1;                   //定义数字端口结构变量
+uint8 SY_flag;                        //定义声音传感器有效标志位
+//改动
+// Mode menu
+static menuItem_t pMenuItems[] =
+{
+#ifdef ASSY_EXP4618_CC2420
+  // Using Softbaugh 7-seg display
+  " L S    ", SWITCH,
+  " LIGHT  ", LIGHT
+#else
+  // SRF04EB and SRF05EB
+  "Switch",   SWITCH,
+  "Light",    LIGHT
+#endif
+};
+
+static menu_t pMenu =
+{
+  pMenuItems,
+  N_ITEMS(pMenuItems)
+};
+
+
+#ifdef SECURITY_CCM
+// Security key
+static uint8 key[]= {
+    0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+    0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+};
+#endif
+
+/***********************************************************************************
+* LOCAL FUNCTIONS
+*/
+static void appLight();
+static void appSwitch();
+static uint8 appSelectMode(void);
+
+
+/***********************************************************************************
+* @fn          appLight
+*
+* @brief       Application code for light application. Puts MCU in endless
+*              loop waiting for user input from joystick.
+*
+* @param       basicRfConfig - file scope variable. Basic RF configuration data
+*              pRxData - file scope variable. Pointer to buffer for RX data
+*
+* @return      none
+*/
+uint8 get_swsensor(void)
+{
+    P1SEL &= ~( 1 <<4);  //设置p1.4为普通i/o口
+    P1DIR &= ~( 1 <<4);  //设置p1.4为输出方向
+    return P1_4;         //返回p1.4电平
+}
+
+static void appLight()
+{
+    halLcdWriteLine(HAL_LCD_LINE_1, "Light");
+    halLcdWriteLine(HAL_LCD_LINE_2, "Ready");
+    
+#ifdef ASSY_EXP4618_CC2420
+    halLcdClearLine(1);
+    halLcdWriteSymbol(HAL_LCD_SYMBOL_RX, 1);
+#endif
+
+    // Initialize BasicRF
+    basicRfConfig.myAddr = LIGHT_ADDR;
+    if(basicRfInit(&basicRfConfig)==FAILED) {
+      HAL_ASSERT(FALSE);
+    }
+    basicRfReceiveOn();
+
+    // Main loop
+    while (TRUE) {
+        while(!basicRfPacketIsReady());
+
+        if(basicRfReceive(pRxData, APP_PAYLOAD_LENGTH, NULL)>0) {
+            if(pRxData[0] == LIGHT_TOGGLE_CMD) {
+                halLedToggle(1);
+            }
+        }
+    }
+}
+
+
+/***********************************************************************************
+* @fn          appSwitch
+*
+* @brief       Application code for switch application. Puts MCU in
+*              endless loop to wait for commands from from switch
+*
+* @param       basicRfConfig - file scope variable. Basic RF configuration data
+*              pTxData - file scope variable. Pointer to buffer for TX
+*              payload
+*              appState - file scope variable. Holds application state
+*
+* @return      none
+*/
+//change
+void port13Int(void)        
+{   
+    SY_flag = 0x01;
+}
+static void appSwitch()
+{ 
+  uint8 sensor_val;
+    halBoardInit();  //模块相关资源的初始化
+//  ConfigRf_Init(); //无线收发参数的配置初始化 
+    port1->port = 1;
+    port1->pin = 0x03;
+    port1->pin_bm = 0x08;
+    port1->dir = 0;
+    halDigioConfig(port1);
+    halDigioIntEnable(port1);
+    halDigioIntConnect(port1, port13Int);
+    pTxData[0] = LIGHT_TOGGLE_CMD;
+    //Initialize BasicRF
+    basicRfConfig.myAddr = SWITCH_ADDR;
+    if(basicRfInit(&basicRfConfig)==FAILED) {
+      HAL_ASSERT(FALSE);
+    }
+
+     //Keep Receiver off when not needed to save power
+    basicRfReceiveOff();
+  while (TRUE){
+  sensor_val=get_swsensor();    //读取开关量，即P1.3引脚状态
+        if(sensor_val)                //红外传感器模块
+        {
+          basicRfSendPacket(LIGHT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+
+            // Put MCU to sleep. It will wake up on joystick interrupt
+            halIntOff();
+            halMcuSetLowPowerMode(HAL_MCU_LPM_3); // Will turn on global
+            // interrupt enable
+            halIntOn();
+            halLedSet(2);             //点亮LED2     
+            if(halButtonPushed()==HAL_BUTTON_1){
+            basicRfSendPacket(LIGHT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+
+            // Put MCU to sleep. It will wake up on joystick interrupt
+            halIntOff();
+            halMcuSetLowPowerMode(HAL_MCU_LPM_3); // Will turn on global
+            // interrupt enable
+            halIntOn();
+
+        }
+        }
+        else
+        {
+            halLedClear(2);           //熄灭LED2
+        }
+        if(SY_flag)                   //声音传感器模块
+        { 
+          basicRfSendPacket(LIGHT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+
+            // Put MCU to sleep. It will wake up on joystick interrupt
+            halIntOff();
+            halMcuSetLowPowerMode(HAL_MCU_LPM_3); // Will turn on global
+            // interrupt enable
+            halIntOn();
+            SY_flag = 0x00;
+            halLedSet(1);             //点亮LED1
+            halMcuWaitMs(10000);      //延时10s
+            halLedClear(1);           //熄灭LED1
+            if(halButtonPushed()==HAL_BUTTON_1){
+            basicRfSendPacket(LIGHT_ADDR, pTxData, APP_PAYLOAD_LENGTH);
+
+            // Put MCU to sleep. It will wake up on joystick interrupt
+            halIntOff();
+            halMcuSetLowPowerMode(HAL_MCU_LPM_3); // Will turn on global
+            // interrupt enable
+            halIntOn();
+
+        }
+            
+          }      
+  //改动
+ 
+    // Main loop
+    }
+}
+
+
+/***********************************************************************************
+* @fn          main
+*
+* @brief       This is the main entry of the "Light Switch" application.
+*              After the application modes are chosen the switch can
+*              send toggle commands to a light device.
+*
+* @param       basicRfConfig - file scope variable. Basic RF configuration
+*              data
+*              appState - file scope variable. Holds application state
+*
+* @return      none
+*/
+void main(void)
+{
+   
+    //uint8 appMode = NONE;
+    uint8 appMode = SWITCH;
+     //uint8 appMode = LIGHT;
+    // Config basicRF
+    basicRfConfig.panId = PAN_ID;
+    basicRfConfig.channel = RF_CHANNEL;
+    basicRfConfig.ackRequest = TRUE;
+#ifdef SECURITY_CCM
+    basicRfConfig.securityKey = key;
+#endif
+
+    // Initalise board peripherals
+    halBoardInit();
+    halJoystickInit();
+
+    // Initalise hal_rf
+    if(halRfInit()==FAILED) {
+      HAL_ASSERT(FALSE);
+    }
+
+    // Indicate that device is powered
+    halLedSet(1);
+
+    // Print Logo and splash screen on LCD
+  //  utilPrintLogo("Light Switch");
+
+    // Wait for user to press S1 to enter menu
+  //  while (halButtonPushed()!=HAL_BUTTON_1);
+    halMcuWaitMs(350);
+    halLcdClear();
+
+    // Set application role
+  //  appMode = appSelectMode();
+    halLcdClear();
+
+    // Transmitter application
+    if(appMode == SWITCH) {
+        // No return from here
+        appSwitch();
+    }
+    // Receiver application
+    else if(appMode == LIGHT) {
+        // No return from here
+        appLight();
+    }
+    // Role is undefined. This code should not be reached
+    HAL_ASSERT(FALSE);
+}
+
+
+/****************************************************************************************
+* @fn          appSelectMode
+*
+* @brief       Select application mode
+*
+* @param       none
+*
+* @return      uint8 - Application mode chosen
+*/
+static uint8 appSelectMode(void)
+{
+    halLcdWriteLine(1, "Device Mode: ");
+
+    return utilMenuSelect(&pMenu);
+}
+
+
